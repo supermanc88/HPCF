@@ -18,6 +18,8 @@ struct hpcf_event {
     int fd;
     int events;
     void *arg;
+    int writable;
+    int conn_closed;
     hpcf_event_callback_t callback;
     int active;
 };

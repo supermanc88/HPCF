@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -44,7 +45,7 @@ int g_free_connect_fd_num = HPCF_MAX_EVENTS;
 void hpcf_read_data(int fd, void *arg)
 {
     struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
-    printf("process:%d read data from fd: %d\n", getpid(), fd);
+    printf("%s process:%d read data from fd: %d\n", __func__, getpid(), fd);
     // read to task->data
     char *buf = task->data;
     task->data_len = read(fd, buf, MAX_BUF_SIZE);
@@ -54,26 +55,72 @@ void hpcf_read_data(int fd, void *arg)
         // 对方关闭了连接
         printf("peer close connection\n");
         task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+        task->hpcf_event->conn_closed = 1;
+    } else if (task->data_len < 0) {
+        // 读取失败
+        printf("read data failed\n");
+        task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+    } else {
+        // 读取成功
+        printf("read data: %s\n", buf);
     }
 }
 
 void hpcf_process_data(int fd, void *arg)
 {
-    printf("process:%d process data from fd: %d\n", getpid(), fd);
+    printf("%s process:%d process data from fd: %d\n", __func__, getpid(), fd);
     struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
+
+    // 处理完成后，将下一步改成写数据
+    task->step = OTHER_TASK_STEP_WRITE;
+
+    // 当数据处理完毕后，就要准备将数据发送给对方
+    // 需要在epoll中增加写事件
+    struct hpcf_event *ev = task->hpcf_event;
+    hpcf_epoll_del_event(g_accept_epfd, ev);
+    hpcf_epoll_init_event(ev, fd, EPOLLOUT, ev, hpcf_write_event_callback);
+    hpcf_epoll_add_event(g_accept_epfd, ev, EPOLLOUT);
 }
 
 void hpcf_write_data(int fd, void *arg)
 {
     struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
-    task->data_len = write(fd, task->data, task->data_len);
-    printf("process:%d write %d data to fd: %d\n", getpid(), task->data_len, fd);
-
+    if (task->hpcf_event->conn_closed) {
+        task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+        return;
+    }
+    if(task->hpcf_event->writable) {
+        task->step++;
+        // printf("%s\n", __func__);
+        // task->data_len = write(fd, task->data, task->data_len);
+        // printf("process:%d write %d data to fd: %d\n", getpid(), task->data_len, fd);
+        // if (task->data_len == -1) {
+        //     printf("write error: %s\n", strerror(errno));
+        //     // if (errno == EAGAIN) {
+        //     //     // 写缓冲区已满，需要等待再次写
+        //     //     task->step = OTHER_TASK_STEP_WRITE;
+        //     // } else {
+        //         // 其他错误
+        //         task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+        //     // }
+        // } else if (task->data_len == 0) {
+        //     // 对方关闭了连接
+        //     task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+        // } else {
+        //     // 写完了，继续监听读
+        //     task->step = OTHER_TASK_STEP_FINISH;
+        //     struct hpcf_event *ev = task->hpcf_event;
+        //     hpcf_epoll_del_event(g_accept_epfd, ev);
+        //     hpcf_epoll_init_event(ev, fd, EPOLLIN, ev, hpcf_read_event_callback);
+        //     hpcf_epoll_add_event(g_accept_epfd, ev, EPOLLIN);
+        // }
+    }
 }
 
-void hpcf_read_data_callback(int client_fd, int events, void *arg)
+void hpcf_read_event_callback(int client_fd, int events, void *arg)
 {
     // 添加任务到其它任务队列
+    printf("%s\n", __func__);
     struct hpcf_event *hev = (struct hpcf_event *)arg;
     struct hpcf_other_task *task = hpcf_new_other_task(client_fd,
         hev, hpcf_read_data, hpcf_process_data, hpcf_write_data);
@@ -81,9 +128,12 @@ void hpcf_read_data_callback(int client_fd, int events, void *arg)
     list_add_tail(&task->list, &g_other_task_queue);
 }
 
-void hpcf_write_data_callback(int client_fd, int events, void *arg)
+void hpcf_write_event_callback(int client_fd, int events, void *arg)
 {
-
+    // 如果进入此流程，就说明连接可写，那么就标记cfd可写
+    printf("%s fd %d\n", __func__, client_fd);
+    struct hpcf_event *hev = (struct hpcf_event *)arg;
+    hev->writable = 1;
 }
 
 void hpcf_listen_callback(int listen_fd, int events, void *arg)
@@ -116,7 +166,7 @@ void hpcf_listen_callback(int listen_fd, int events, void *arg)
             return;
         }
         g_free_connect_fd_num--;
-        hpcf_epoll_init_event(&g_accept_events[i], client_fd, EPOLLIN, &g_accept_events[i], hpcf_read_data_callback);
+        hpcf_epoll_init_event(&g_accept_events[i], client_fd, EPOLLIN, &g_accept_events[i], hpcf_read_event_callback);
         hpcf_epoll_add_event(g_accept_epfd, &g_accept_events[i], EPOLLIN);
     } while (0);
 }
@@ -131,7 +181,7 @@ void hpcf_worker_process_content()
     struct epoll_event revents[HPCF_MAX_EVENTS];
 
     // epoll wait timeout
-    int timeout = 1;
+    int timeout = 0;
 
     // init other task queue
     INIT_LIST_HEAD(&g_other_task_queue);
@@ -141,6 +191,7 @@ void hpcf_worker_process_content()
         // 1. 判断是否获取了互斥锁
         // 2. 如果获取了锁，才会去epoll_wait listen_epfd，才会去创建连接
         // 3. 否则去执行其它任务
+        timeout = 0;
 
         do {
             if (g_accept_disabled > 0) {
@@ -149,7 +200,9 @@ void hpcf_worker_process_content()
 
             if (hpcf_try_lock_fd(g_lock_fd) == 0) {
                 is_get_lock = 1;
+                // printf("%s %d get lock\n", __func__, getpid());
             } else {
+                is_get_lock = 0;
                 break;
             }
 
@@ -174,7 +227,6 @@ void hpcf_worker_process_content()
             // 如果获取了锁，则释放
             if (is_get_lock) {
                 hpcf_unlock_fd(g_lock_fd);
-                is_get_lock = 0;
             }
         } while (0);
 
@@ -187,6 +239,7 @@ void hpcf_worker_process_content()
             struct list_head *pos, *n;
             list_for_each_safe(pos, n, &g_other_task_queue) {
                 struct hpcf_other_task *task = list_entry(pos, struct hpcf_other_task, list);
+                printf("pid: %d fd: %d, step: %d\n", getpid(), task->fd, task->step);
                 switch (task->step) {
                     case OTHER_TASK_STEP_INIT:
                     {
@@ -201,18 +254,21 @@ void hpcf_worker_process_content()
                     case OTHER_TASK_STEP_PROCESS:
                     {
                         task->process_data(task->fd, task);
-                        task->step++;
+                        // task->step++;
                     }
                     break;
                     case OTHER_TASK_STEP_WRITE:
                     {
+                        // TODO 这里很有可能写缓冲被占满了，需要后续处理，write的时候返回-1
                         task->write_data(task->fd, task);
-                        task->step++;
+                        // task->step++;
                     }
                     break;
                     case OTHER_TASK_STEP_FINISH:
                     {
                         // 一个tps完成
+                        // 删除此任务
+                        printf("%s %d finish %d task\n", __func__, getpid(), task->fd);
                         list_del(pos);
                     }
                     break;
@@ -235,12 +291,22 @@ void hpcf_worker_process_content()
             }
         }
 
+        if (is_get_lock == 1) {
+            // 说明上面抢到锁了，且无其它任务，当无连接进来时，上面休眠1ms，下面就不需要休眠了
+            // 如果有其它任务时，上面没有超时，就尽快把任务执行完毕，下面也不需要休眠了
+            timeout = 0;
+        } else if (is_get_lock == 0) {
+            timeout = 1;
+        }
         int n = epoll_wait(g_accept_epfd, revents, HPCF_MAX_EVENTS, timeout);
         int i;
         for (i = 0; i < n; i++) {
             struct epoll_event *event = &revents[i];
             struct hpcf_event *hev = event->data.ptr;
             if ( (event->events & EPOLLIN) && (hev->events & EPOLLIN) ) {
+                hev->callback(hev->fd, hev->events, hev->arg);
+            }
+            if ( (event->events & EPOLLOUT) && (hev->events & EPOLLOUT) ) {
                 hev->callback(hev->fd, hev->events, hev->arg);
             }
         }

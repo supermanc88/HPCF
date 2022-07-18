@@ -11,8 +11,10 @@
 void hpcf_epoll_init_event(struct hpcf_event *hev, int fd, int events, void *arg, hpcf_event_callback_t callback)
 {
     hev->fd = fd;
-    hev->events = events;
+    hev->events = events | EPOLLET;
     hev->arg = arg;
+    hev->writable = 0;
+    hev->conn_closed = 0;
     hev->callback = callback;
     hev->active = 0;
 }
@@ -20,7 +22,7 @@ void hpcf_epoll_init_event(struct hpcf_event *hev, int fd, int events, void *arg
 void hpcf_epoll_add_event(int epfd, struct hpcf_event *hev, int events)
 {
     struct epoll_event ev;
-    hev->events = ev.events = events;
+    hev->events = ev.events = events | EPOLLET;
     ev.data.ptr = hev;
 
     int opt;
