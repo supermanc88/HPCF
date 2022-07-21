@@ -17,23 +17,30 @@
 
 #include "hpcf_main.h"
 #include "hpcf_event.h"
-#include "hpcf_epoll_wraper.h"
 #include "hpcf_fd_helper.h"
 #include "hpcf_list_helper.h"
+#include "hpcf_connection.h"
+#include "hpcf_tcp.h"
+#include "hpcf_epoll_wraper.h"
 
-// 用来保存listenfd的事件
+// 用来保存listenfd的事件 弃用
 struct hpcf_event g_listen_event;
-// 用来保存connectfd的事件
+// 用来保存connectfd的事件 弃用
 struct hpcf_event g_accept_events[HPCF_MAX_EVENTS];
 
-// 用来监听listenfd的epollfd
+// 用来监听listenfd的epollfd 弃用
 int g_listen_epfd;
-// 用来监听connectfd的epollfd
+// 用来监听connectfd的epollfd 弃用
 int g_accept_epfd;
+
+// 用来监听listenfd和connectfd的epollfd
+int g_epoll_fd;
 
 // 用来做互斥锁的文件句柄
 int g_lock_fd;
 
+// 用来保存accept任务的队列
+struct list_head g_accept_task_queue;
 // 其它任务队列
 struct list_head g_other_task_queue;
 
@@ -42,134 +49,137 @@ int g_accept_disabled = 0;
 // 空闲的connectfd数量
 int g_free_connect_fd_num = HPCF_MAX_EVENTS;
 
-void hpcf_read_data(int fd, void *arg)
-{
-    struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
-    printf("%s process:%d read data from fd: %d\n", __func__, getpid(), fd);
-    // read to task->data
-    char *buf = task->data;
-    task->data_len = read(fd, buf, MAX_BUF_SIZE);
-    buf[task->data_len] = '\0';
+// 用来保存所有已连接的connection队列
+struct list_head g_all_connection_queue;
 
-    if (task->data_len == 0) {
-        // 对方关闭了连接
-        printf("peer close connection\n");
-        task->step = HPCF_OTHER_TASK_STEP_CLOSE;
-        task->hpcf_event->conn_closed = 1;
-    } else if (task->data_len < 0) {
-        // 读取失败
-        printf("read data failed\n");
-        task->step = HPCF_OTHER_TASK_STEP_CLOSE;
-    } else {
-        // 读取成功
-        printf("read data: %s\n", buf);
-    }
-}
+// void hpcf_read_data(int fd, void *arg)
+// {
+//     struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
+//     printf("%s process:%d read data from fd: %d\n", __func__, getpid(), fd);
+//     // read to task->data
+//     char *buf = task->data;
+//     task->data_len = read(fd, buf, MAX_BUF_SIZE);
+//     buf[task->data_len] = '\0';
 
-void hpcf_process_data(int fd, void *arg)
-{
-    printf("%s process:%d process data from fd: %d\n", __func__, getpid(), fd);
-    struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
+//     if (task->data_len == 0) {
+//         // 对方关闭了连接
+//         printf("peer close connection\n");
+//         task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+//         task->hpcf_event->conn_closed = 1;
+//     } else if (task->data_len < 0) {
+//         // 读取失败
+//         printf("read data failed\n");
+//         task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+//     } else {
+//         // 读取成功
+//         printf("read data: %s\n", buf);
+//     }
+// }
 
-    // 处理完成后，将下一步改成写数据
-    task->step = OTHER_TASK_STEP_WRITE;
+// void hpcf_process_data(int fd, void *arg)
+// {
+//     printf("%s process:%d process data from fd: %d\n", __func__, getpid(), fd);
+//     struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
 
-    // 当数据处理完毕后，就要准备将数据发送给对方
-    // 需要在epoll中增加写事件
-    struct hpcf_event *ev = task->hpcf_event;
-    hpcf_epoll_del_event(g_accept_epfd, ev);
-    hpcf_epoll_init_event(ev, fd, EPOLLOUT, ev, hpcf_write_event_callback);
-    hpcf_epoll_add_event(g_accept_epfd, ev, EPOLLOUT);
-}
+//     // 处理完成后，将下一步改成写数据
+//     task->step = OTHER_TASK_STEP_WRITE;
 
-void hpcf_write_data(int fd, void *arg)
-{
-    struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
-    if (task->hpcf_event->conn_closed) {
-        task->step = HPCF_OTHER_TASK_STEP_CLOSE;
-        return;
-    }
-    if(task->hpcf_event->writable) {
-        task->step++;
-        // printf("%s\n", __func__);
-        // task->data_len = write(fd, task->data, task->data_len);
-        // printf("process:%d write %d data to fd: %d\n", getpid(), task->data_len, fd);
-        // if (task->data_len == -1) {
-        //     printf("write error: %s\n", strerror(errno));
-        //     // if (errno == EAGAIN) {
-        //     //     // 写缓冲区已满，需要等待再次写
-        //     //     task->step = OTHER_TASK_STEP_WRITE;
-        //     // } else {
-        //         // 其他错误
-        //         task->step = HPCF_OTHER_TASK_STEP_CLOSE;
-        //     // }
-        // } else if (task->data_len == 0) {
-        //     // 对方关闭了连接
-        //     task->step = HPCF_OTHER_TASK_STEP_CLOSE;
-        // } else {
-        //     // 写完了，继续监听读
-        //     task->step = OTHER_TASK_STEP_FINISH;
-        //     struct hpcf_event *ev = task->hpcf_event;
-        //     hpcf_epoll_del_event(g_accept_epfd, ev);
-        //     hpcf_epoll_init_event(ev, fd, EPOLLIN, ev, hpcf_read_event_callback);
-        //     hpcf_epoll_add_event(g_accept_epfd, ev, EPOLLIN);
-        // }
-    }
-}
+//     // 当数据处理完毕后，就要准备将数据发送给对方
+//     // 需要在epoll中增加写事件
+//     struct hpcf_event *ev = task->hpcf_event;
+//     hpcf_epoll_del_event(g_accept_epfd, ev);
+//     hpcf_epoll_init_event(ev, fd, EPOLLOUT, ev, hpcf_write_event_callback);
+//     hpcf_epoll_add_event(g_accept_epfd, ev, EPOLLOUT);
+// }
 
-void hpcf_read_event_callback(int client_fd, int events, void *arg)
-{
-    // 添加任务到其它任务队列
-    printf("%s\n", __func__);
-    struct hpcf_event *hev = (struct hpcf_event *)arg;
-    struct hpcf_other_task *task = hpcf_new_other_task(client_fd,
-        hev, hpcf_read_data, hpcf_process_data, hpcf_write_data);
+// void hpcf_write_data(int fd, void *arg)
+// {
+//     struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
+//     if (task->hpcf_event->conn_closed) {
+//         task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+//         return;
+//     }
+//     if(task->hpcf_event->writable) {
+//         task->step++;
+//         // printf("%s\n", __func__);
+//         // task->data_len = write(fd, task->data, task->data_len);
+//         // printf("process:%d write %d data to fd: %d\n", getpid(), task->data_len, fd);
+//         // if (task->data_len == -1) {
+//         //     printf("write error: %s\n", strerror(errno));
+//         //     // if (errno == EAGAIN) {
+//         //     //     // 写缓冲区已满，需要等待再次写
+//         //     //     task->step = OTHER_TASK_STEP_WRITE;
+//         //     // } else {
+//         //         // 其他错误
+//         //         task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+//         //     // }
+//         // } else if (task->data_len == 0) {
+//         //     // 对方关闭了连接
+//         //     task->step = HPCF_OTHER_TASK_STEP_CLOSE;
+//         // } else {
+//         //     // 写完了，继续监听读
+//         //     task->step = OTHER_TASK_STEP_FINISH;
+//         //     struct hpcf_event *ev = task->hpcf_event;
+//         //     hpcf_epoll_del_event(g_accept_epfd, ev);
+//         //     hpcf_epoll_init_event(ev, fd, EPOLLIN, ev, hpcf_read_event_callback);
+//         //     hpcf_epoll_add_event(g_accept_epfd, ev, EPOLLIN);
+//         // }
+//     }
+// }
 
-    list_add_tail(&task->list, &g_other_task_queue);
-}
+// void hpcf_read_event_callback(int client_fd, int events, void *arg)
+// {
+//     // 添加任务到其它任务队列
+//     printf("%s\n", __func__);
+//     struct hpcf_event *hev = (struct hpcf_event *)arg;
+//     struct hpcf_other_task *task = hpcf_new_other_task(client_fd,
+//         hev, hpcf_read_data, hpcf_process_data, hpcf_write_data);
 
-void hpcf_write_event_callback(int client_fd, int events, void *arg)
-{
-    // 如果进入此流程，就说明连接可写，那么就标记cfd可写
-    printf("%s fd %d\n", __func__, client_fd);
-    struct hpcf_event *hev = (struct hpcf_event *)arg;
-    hev->writable = 1;
-}
+//     list_add_tail(&task->list, &g_other_task_queue);
+// }
 
-void hpcf_listen_callback(int listen_fd, int events, void *arg)
-{
-    // accept socket
-    struct sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
-    int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-    if (client_fd == -1) {
-        perror("accept error");
-        exit(1);
-    }
-    printf("accept a client, fd: %d\n", client_fd);
-    printf("client ip: %s, port: %d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+// void hpcf_write_event_callback(int client_fd, int events, void *arg)
+// {
+//     // 如果进入此流程，就说明连接可写，那么就标记cfd可写
+//     printf("%s fd %d\n", __func__, client_fd);
+//     struct hpcf_event *hev = (struct hpcf_event *)arg;
+//     hev->writable = 1;
+// }
 
-    // set nonblock
-    hpcf_set_fd_nonblock(client_fd);
+// void hpcf_listen_callback(int listen_fd, int events, void *arg)
+// {
+//     // accept socket
+//     struct sockaddr_in client_addr;
+//     socklen_t client_addr_len = sizeof(client_addr);
+//     int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+//     if (client_fd == -1) {
+//         perror("accept error");
+//         exit(1);
+//     }
+//     printf("accept a client, fd: %d\n", client_fd);
+//     printf("client ip: %s, port: %d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
-    // find a empty event and add it to epoll
-    int i;
-    do {
-        for (i = 0; i < HPCF_MAX_EVENTS; i++) {
-            if (g_accept_events[i].fd == -1) {
-                break;
-            }
-        }
-        if (i == HPCF_MAX_EVENTS) {
-            printf("accept event is full\n");
-            close(client_fd);
-            return;
-        }
-        g_free_connect_fd_num--;
-        hpcf_epoll_init_event(&g_accept_events[i], client_fd, EPOLLIN, &g_accept_events[i], hpcf_read_event_callback);
-        hpcf_epoll_add_event(g_accept_epfd, &g_accept_events[i], EPOLLIN);
-    } while (0);
-}
+//     // set nonblock
+//     hpcf_set_fd_nonblock(client_fd);
+
+//     // find a empty event and add it to epoll
+//     int i;
+//     do {
+//         for (i = 0; i < HPCF_MAX_EVENTS; i++) {
+//             if (g_accept_events[i].fd == -1) {
+//                 break;
+//             }
+//         }
+//         if (i == HPCF_MAX_EVENTS) {
+//             printf("accept event is full\n");
+//             close(client_fd);
+//             return;
+//         }
+//         g_free_connect_fd_num--;
+//         hpcf_epoll_init_event(&g_accept_events[i], client_fd, EPOLLIN, &g_accept_events[i], hpcf_read_event_callback);
+//         hpcf_epoll_add_event(g_accept_epfd, &g_accept_events[i], EPOLLIN);
+//     } while (0);
+// }
 
 // worker process function
 void hpcf_worker_process_content()
@@ -183,6 +193,8 @@ void hpcf_worker_process_content()
     // epoll wait timeout
     int timeout = 0;
 
+    // init conn queue
+    INIT_LIST_HEAD(&g_all_connection_queue);
     // init other task queue
     INIT_LIST_HEAD(&g_other_task_queue);
 
@@ -209,18 +221,31 @@ void hpcf_worker_process_content()
             // 如果其它任务队列中有任务，则监听listen_epfd时不阻塞
             // 否则监听listen_epfd时阻塞
             if (list_empty(&g_other_task_queue)) {
-                timeout = 1;
+                timeout = 5;
             } else {
-                timeout = 0;
+                timeout = 1;
             }
 
-            int n = epoll_wait(g_listen_epfd, revents, HPCF_MAX_EVENTS, timeout);
+            int n = epoll_wait(g_epoll_fd, revents, HPCF_MAX_EVENTS, timeout);
             int i;
             for (i = 0; i < n; i++) {
                 struct epoll_event *event = &revents[i];
-                struct hpcf_event *hev = event->data.ptr;
-                if ( (event->events & EPOLLIN) && (hev->events & EPOLLIN) ) {
-                    hev->callback(hev->fd, hev->events, hev->arg);
+                // struct hpcf_event *hev = event->data.ptr;
+                // if ( (event->events & EPOLLIN) && (hev->events & EPOLLIN) ) {
+                //     hev->callback(hev->fd, hev->events, hev->arg);
+                // }
+                struct hpcf_connection *c = event->data.ptr;
+                struct hpcf_event *rev = c->read_event;
+                struct hpcf_event *wev = c->write_event;
+                // printf("returned events = %d\n", event->events);
+                if ( (event->events & EPOLLIN) && (rev->events & EPOLLIN) ) {
+                    rev->active = 1;
+                    rev->ready = 1;
+                    rev->callback(rev->fd, rev->events, rev->arg);
+                }
+
+                if ( (event->events & EPOLLOUT) && wev->active ) {
+                    wev->callback(wev->fd, wev->events, wev->arg);
                 }
             }
 
@@ -235,6 +260,8 @@ void hpcf_worker_process_content()
         // 其它任务也就是读写socket事件
         
         // 1. 遍历其它任务队列并处理
+        hpcf_process_task_queue(&g_other_task_queue);
+#if 0
         if (!list_empty(&g_other_task_queue)) {
             struct list_head *pos, *n;
             list_for_each_safe(pos, n, &g_other_task_queue) {
@@ -290,7 +317,9 @@ void hpcf_worker_process_content()
                 }
             }
         }
+#endif
 
+#if 0
         if (is_get_lock == 1) {
             // 说明上面抢到锁了，且无其它任务，当无连接进来时，上面休眠1ms，下面就不需要休眠了
             // 如果有其它任务时，上面没有超时，就尽快把任务执行完毕，下面也不需要休眠了
@@ -310,6 +339,7 @@ void hpcf_worker_process_content()
                 hev->callback(hev->fd, hev->events, hev->arg);
             }
         }
+#endif
     }
 
 }
@@ -349,8 +379,17 @@ void hpcf_init_listen_socket(int listen_epfd, int listen_port)
     hpcf_set_fd_nonblock(listen_fd);
 
     // init listen socket event
-    hpcf_epoll_init_event(&g_listen_event, listen_fd, EPOLLIN, &g_listen_epfd, hpcf_listen_callback);
-    hpcf_epoll_add_event(listen_epfd, &g_listen_event, EPOLLIN);
+    // hpcf_epoll_init_event(&g_listen_event, listen_fd, EPOLLIN, &g_listen_epfd, hpcf_listen_callback);
+    // hpcf_epoll_add_event(listen_epfd, &g_listen_event, EPOLLIN);
+
+    // 创建一个用来保存listenfd的hpcf_connection
+    struct hpcf_connection *listen_conn = hpcf_new_connection(listen_fd,
+                                                hpcf_tcp_accept_event_callback,
+                                                NULL,
+                                                1);
+
+    // add listen_fd to epoll
+    hpcf_epoll_add_event(g_epoll_fd, listen_conn, EPOLLIN);
 
 }
 
@@ -363,6 +402,8 @@ int main(int argc, char *argv[])
     hpcf_event_clear_n(g_accept_events, HPCF_MAX_EVENTS);
 
     // 创建epollfd
+    g_epoll_fd = epoll_create(HPCF_MAX_EVENTS);
+#if 0
     g_listen_epfd = epoll_create(1);
     if (g_listen_epfd == -1) {
         perror("epoll_create error");
@@ -373,27 +414,29 @@ int main(int argc, char *argv[])
         perror("epoll_create error");
         exit(1);
     }
+#endif
 
     // 打开一个用来作互斥锁的文件
     g_lock_fd = open("/tmp/lock.file", O_RDWR | O_CREAT, 0666);
 
-    hpcf_init_listen_socket(g_listen_epfd, HPCF_LISTEN_PORT);
+
+    hpcf_init_listen_socket(g_epoll_fd, HPCF_LISTEN_PORT);
 
     // create worker process
-    int i;
-    for (i = 0; i < HPCF_WORKER_PROCESS_NUM; i++) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            // worker process
+    // int i;
+    // for (i = 0; i < HPCF_WORKER_PROCESS_NUM; i++) {
+    //     pid_t pid = fork();
+    //     if (pid == 0) {
+    //         // worker process
             hpcf_worker_process_content();
-            break;
-        } else if (pid > 0) {
-            // parent process
-        } else {
-            perror("fork error");
-            exit(1);
-        }
-    }
+    //         break;
+    //     } else if (pid > 0) {
+    //         // parent process
+    //     } else {
+    //         perror("fork error");
+    //         exit(1);
+    //     }
+    // }
 
     // wait for worker process
     wait(NULL);
