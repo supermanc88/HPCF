@@ -22,6 +22,7 @@
 #include "hpcf_connection.h"
 #include "hpcf_tcp.h"
 #include "hpcf_epoll_wraper.h"
+#include "hpcf_setaffinity.h"
 
 // 用来保存listenfd的事件 弃用
 struct hpcf_event g_listen_event;
@@ -445,6 +446,8 @@ int main(int argc, char *argv[])
         pid_t pid = fork();
         if (pid == 0) {
             // worker process
+            // set worker process affinity
+            hpcf_set_affinity(i);
             // 创建epollfd
             g_epoll_fd = epoll_create(HPCF_MAX_EVENTS);
             struct hpcf_connection *listen_conn = hpcf_new_connection(listen_fd,
