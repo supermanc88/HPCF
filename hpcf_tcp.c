@@ -33,9 +33,15 @@ void hpcf_tcp_accept_event_callback(int fd, int events, void *arg)
                                                 hpcf_tcp_read_event_callback,
                                                 hpcf_tcp_write_event_callback,
                                                 0);
-    
+       // 获取socket的发送和接收缓冲区大小
+    int s_rec = 0;
+    int s_send = 0;
+    socklen_t len = sizeof(s_rec);
+    getsockopt(connfd, SOL_SOCKET, SO_RCVBUF, &s_rec, &len);
+    getsockopt(connfd, SOL_SOCKET, SO_SNDBUF, &s_send, &len);
+    printf("listen socket recv buf size: %d, send buf size: %d\n", s_rec, s_send); 
     // 添加到epoll中
-    hpcf_epoll_add_event(g_epoll_fd, c, EPOLLIN | EPOLLOUT);
+    hpcf_epoll_add_event(g_epoll_fd, c, EPOLLIN|EPOLLET|EPOLLRDHUP);
 
 }
 
@@ -44,6 +50,7 @@ void hpcf_tcp_read_event_callback(int fd, int events, void *arg)
 {
     struct hpcf_event *hev = (struct hpcf_event *)arg;
     struct hpcf_connection *c = (struct hpcf_connection *)hev->data;
+    struct hpcf_event *wev = c->write_event;
 
     // 如果hev中的ready为1，说明真的有数据进来了，开始读取数据
     if (hev->ready) {
@@ -54,10 +61,15 @@ void hpcf_tcp_read_event_callback(int fd, int events, void *arg)
 
         // 如果读取的数据长度为0，说明连接已经断开了
         if (n == 0) {
+            printf("connection %d closed\n", hev->fd);
             // 从epoll中删除连接
             hpcf_epoll_del_event(g_epoll_fd, c);
             // 关闭连接并释放连接所用内存
             hpcf_free_connection(c);
+            
+            if (wev->active) {
+                wev->active = 0;
+            }
         } else if (n < 0) {
             // 从epoll中删除连接
             hpcf_epoll_del_event(g_epoll_fd, c);
@@ -90,10 +102,13 @@ void hpcf_tcp_process_event_callback(int fd, int events, void *arg)
 
     char *buf = c->buffer;
     int n = strlen(buf);
-    printf("recv: %s\n", buf);
+    printf("recv from %d: %s\n", hev->fd, buf);
     // 将数据处理完毕后，将数据处理完毕的标志置为1
     hev->completed = 1;
     write_ev->active = 1;
+
+    // 数据处理完毕后开始激活写事件
+    hpcf_epoll_add_event(g_epoll_fd, c, EPOLLOUT);
 
     // 释放hev内存
     hpcf_free_event(hev);
@@ -102,25 +117,28 @@ void hpcf_tcp_process_event_callback(int fd, int events, void *arg)
 // 写入数据的回调函数
 void hpcf_tcp_write_event_callback(int fd, int events, void *arg)
 {
-    struct hpcf_event *hev = (struct hpcf_event *)arg;
-    struct hpcf_connection *c = (struct hpcf_connection *)hev->data;
+    struct hpcf_event *wev = (struct hpcf_event *)arg;
+    struct hpcf_connection *c = (struct hpcf_connection *)wev->data;
     struct hpcf_event *read_ev = c->read_event;
     char *buf = c->buffer;
 
     // 开始发送数据
-    int n = write(hev->fd, buf, strlen(buf));
+    int n = write(wev->fd, buf, strlen(buf));
     if (n <= 0) {
-        printf("write error, errno = %d, %s\n", errno, strerror(errno));
+        printf("write error, fd = %d %s\n", wev->fd, strerror(errno));
         // 从epoll中删除连接
         hpcf_epoll_del_event(g_epoll_fd, c);
         // 发送失败，关闭连接并释放连接所用内存
         hpcf_free_connection(c);
     } else {
         // 发送成功，将数据处理完毕的标志置为1
-        printf("send: %s\n", buf);
+        hpcf_epoll_add_event(g_epoll_fd, c, EPOLLIN |EPOLLET| EPOLLHUP);
+
+        printf("send to %d: %s\n", wev->fd, buf);
         read_ev->ready = 0;
+        read_ev->active = 0;
         read_ev->completed = 0;
-        hev->completed = 1;
-        hev->active = 0;
+        wev->completed = 1;
+        wev->active = 0;
     }
 }

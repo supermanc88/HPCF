@@ -229,6 +229,7 @@ void hpcf_worker_process_content()
             int n = epoll_wait(g_epoll_fd, revents, HPCF_MAX_EVENTS, timeout);
             int i;
             for (i = 0; i < n; i++) {
+                printf("n = %d\n", n);
                 struct epoll_event *event = &revents[i];
                 // struct hpcf_event *hev = event->data.ptr;
                 // if ( (event->events & EPOLLIN) && (hev->events & EPOLLIN) ) {
@@ -237,6 +238,7 @@ void hpcf_worker_process_content()
                 struct hpcf_connection *c = event->data.ptr;
                 struct hpcf_event *rev = c->read_event;
                 struct hpcf_event *wev = c->write_event;
+                // printf("%s %d\n", __func__, c->fd);
                 // printf("returned events = %d\n", event->events);
                 if ( (event->events & EPOLLIN) && (rev->events & EPOLLIN) ) {
                     rev->active = 1;
@@ -345,7 +347,7 @@ void hpcf_worker_process_content()
 }
 
 // init listen socket
-void hpcf_init_listen_socket(int listen_epfd, int listen_port)
+int hpcf_init_listen_socket(int listen_epfd, int listen_port)
 {
     // create listen socket
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -375,6 +377,21 @@ void hpcf_init_listen_socket(int listen_epfd, int listen_port)
         exit(1);
     }
 
+    int s_rec = 0;
+    int s_send = 0;
+
+    // 获取socket的发送和接收缓冲区大小
+    socklen_t len = sizeof(s_rec);
+    getsockopt(listen_fd, SOL_SOCKET, SO_RCVBUF, &s_rec, &len);
+    getsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &s_send, &len);
+    printf("listen socket recv buf size: %d, send buf size: %d\n", s_rec, s_send);
+
+    // 设置socket的发送和接收缓冲区大小
+    s_rec = 1024 * 1024 * 1024;
+    s_send = 1024 * 1024 * 1024;
+    setsockopt(listen_fd, SOL_SOCKET, SO_RCVBUF, &s_rec, sizeof(s_rec));
+    // setsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &s_send, sizeof(s_send));
+
     // set listen socket nonblock
     hpcf_set_fd_nonblock(listen_fd);
 
@@ -382,14 +399,16 @@ void hpcf_init_listen_socket(int listen_epfd, int listen_port)
     // hpcf_epoll_init_event(&g_listen_event, listen_fd, EPOLLIN, &g_listen_epfd, hpcf_listen_callback);
     // hpcf_epoll_add_event(listen_epfd, &g_listen_event, EPOLLIN);
 
-    // 创建一个用来保存listenfd的hpcf_connection
-    struct hpcf_connection *listen_conn = hpcf_new_connection(listen_fd,
-                                                hpcf_tcp_accept_event_callback,
-                                                NULL,
-                                                1);
+    // // 创建一个用来保存listenfd的hpcf_connection
+    // struct hpcf_connection *listen_conn = hpcf_new_connection(listen_fd,
+    //                                             hpcf_tcp_accept_event_callback,
+    //                                             NULL,
+    //                                             1);
 
-    // add listen_fd to epoll
-    hpcf_epoll_add_event(g_epoll_fd, listen_conn, EPOLLIN);
+    // // add listen_fd to epoll
+    // hpcf_epoll_add_event(g_epoll_fd, listen_conn, EPOLLIN);
+
+    return listen_fd;
 
 }
 
@@ -398,11 +417,9 @@ int main(int argc, char *argv[])
     int ret = 0;
 
     // 初始化存放listenfd和connectfd事件的结构体
-    hpcf_event_clear_1(&g_listen_event);
-    hpcf_event_clear_n(g_accept_events, HPCF_MAX_EVENTS);
+    // hpcf_event_clear_1(&g_listen_event);
+    // hpcf_event_clear_n(g_accept_events, HPCF_MAX_EVENTS);
 
-    // 创建epollfd
-    g_epoll_fd = epoll_create(HPCF_MAX_EVENTS);
 #if 0
     g_listen_epfd = epoll_create(1);
     if (g_listen_epfd == -1) {
@@ -420,23 +437,32 @@ int main(int argc, char *argv[])
     g_lock_fd = open("/tmp/lock.file", O_RDWR | O_CREAT, 0666);
 
 
-    hpcf_init_listen_socket(g_epoll_fd, HPCF_LISTEN_PORT);
+    int listen_fd = hpcf_init_listen_socket(g_epoll_fd, HPCF_LISTEN_PORT);
 
     // create worker process
-    // int i;
-    // for (i = 0; i < HPCF_WORKER_PROCESS_NUM; i++) {
-    //     pid_t pid = fork();
-    //     if (pid == 0) {
-    //         // worker process
+    int i;
+    for (i = 0; i < HPCF_WORKER_PROCESS_NUM; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            // worker process
+            // 创建epollfd
+            g_epoll_fd = epoll_create(HPCF_MAX_EVENTS);
+            struct hpcf_connection *listen_conn = hpcf_new_connection(listen_fd,
+                                            hpcf_tcp_accept_event_callback,
+                                            NULL,
+                                            1);
+
+            // add listen_fd to epoll
+            hpcf_epoll_add_event(g_epoll_fd, listen_conn, EPOLLIN);
             hpcf_worker_process_content();
-    //         break;
-    //     } else if (pid > 0) {
-    //         // parent process
-    //     } else {
-    //         perror("fork error");
-    //         exit(1);
-    //     }
-    // }
+            break;
+        } else if (pid > 0) {
+            // parent process
+        } else {
+            perror("fork error");
+            exit(1);
+        }
+    }
 
     // wait for worker process
     wait(NULL);

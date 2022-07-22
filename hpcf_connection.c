@@ -69,5 +69,7 @@ void hpcf_free_connection(struct hpcf_connection *conn)
 {
     hpcf_close_connection(conn);
     free(conn->buffer);
+    free(conn->read_event);
+    free(conn->write_event);
     free(conn);
 }
