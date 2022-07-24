@@ -8,7 +8,7 @@ struct hpcf_connection {
     struct list_head list;
     struct hpcf_event *read_event;
     struct hpcf_event *write_event;
-
+    int in_epoll;          // 是否在epoll中
     int fd;
     char *buffer;   // 用来存储读取/处理结果的数据
 };

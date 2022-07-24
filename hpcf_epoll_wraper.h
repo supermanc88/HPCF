@@ -16,5 +16,9 @@ void hpcf_epoll_add_event(int epfd, struct hpcf_connection *conn, int events);
 
 void hpcf_epoll_del_event(int epfd, struct hpcf_connection *conn);
 
+void hpcf_epoll_enable_accept_event(int epfd, struct hpcf_connection *conn);
+
+void hpcf_epoll_disable_accept_event(int epfd, struct hpcf_connection *conn);
+
 
 #endif /* HPCF_EPOLL_WRAPER */

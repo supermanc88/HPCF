@@ -53,6 +53,9 @@ int g_free_connect_fd_num = HPCF_MAX_EVENTS;
 // 用来保存所有已连接的connection队列
 struct list_head g_all_connection_queue;
 
+int g_listen_fd = 0;
+struct hpcf_connection *g_listen_conn = NULL;
+
 // void hpcf_read_data(int fd, void *arg)
 // {
 //     struct hpcf_other_task *task = (struct hpcf_other_task *)arg;
@@ -214,17 +217,19 @@ void hpcf_worker_process_content()
             if (hpcf_try_lock_fd(g_lock_fd) == 0) {
                 is_get_lock = 1;
                 // printf("%s %d get lock\n", __func__, getpid());
+                hpcf_epoll_enable_accept_event(g_epoll_fd, g_listen_conn);
             } else {
                 is_get_lock = 0;
-                break;
+                // break;
+                hpcf_epoll_disable_accept_event(g_epoll_fd, g_listen_conn);
             }
 
             // 如果其它任务队列中有任务，则监听listen_epfd时不阻塞
             // 否则监听listen_epfd时阻塞
             if (list_empty(&g_other_task_queue)) {
-                timeout = 5;
-            } else {
                 timeout = 1;
+            } else {
+                timeout = 0;
             }
 
             int n = epoll_wait(g_epoll_fd, revents, HPCF_MAX_EVENTS, timeout);
@@ -454,6 +459,11 @@ int main(int argc, char *argv[])
                                             hpcf_tcp_accept_event_callback,
                                             NULL,
                                             1);
+            
+            g_listen_fd = listen_fd;
+            g_listen_conn = listen_conn;
+
+            printf("g_listen_fd: %d g_listen_conn->fd: %d\n", g_listen_fd, g_listen_conn->fd);
 
             // add listen_fd to epoll
             hpcf_epoll_add_event(g_epoll_fd, listen_conn, EPOLLIN);
