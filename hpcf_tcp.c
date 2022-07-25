@@ -13,9 +13,23 @@
 #include "hpcf_tcp.h"
 #include "hpcf_connection.h"
 #include "hpcf_epoll_wraper.h"
+#include "hpcf_module.h"
 
 extern int g_epoll_fd;
 extern struct list_head g_other_task_queue;
+
+// 这里通过读到的数据，进行分析，
+// 根据type，从模块队列中找到对应的模块，然后调用模块的回调函数
+void hpcf_tcp_process_read_data(struct hpcf_connection *conn)
+{
+    // 假如这个解析到的是1
+    int type = 1;
+    struct hpcf_processor_module *module = NULL;
+    module = hpcf_get_processor_module_by_type(type);
+    hpcf_module_processor_callback callback = module->callback;
+    // 这里处理完毕后，数据就写到了conn->write_buffer中，后面再写到socket中就可以了
+    int ret = callback(conn->read_buffer, conn->read_len, conn->write_buffer, &conn->write_len, module->data);
+}
 
 // 用来建立连接的回调函数
 void hpcf_tcp_accept_event_callback(int fd, int events, void *arg)
@@ -54,7 +68,7 @@ void hpcf_tcp_read_event_callback(int fd, int events, void *arg)
 
     // 如果hev中的ready为1，说明真的有数据进来了，开始读取数据
     if (hev->ready) {
-        char *buf = c->buffer;
+        char *buf = c->read_buffer;
         int n = read(hev->fd, buf, MAX_BUF_SIZE);
 
         hev->ready = 0;
@@ -76,6 +90,7 @@ void hpcf_tcp_read_event_callback(int fd, int events, void *arg)
             // 数据读取失败了，关闭连接并释放连接所用内存
             hpcf_free_connection(c);
         } else {
+            c->read_len = n;
             // 读取成功后，将处理数据的任务放到任务队列中
             struct hpcf_event *proc_ev = hpcf_new_event(c->fd,
                                                         0,
@@ -100,9 +115,15 @@ void hpcf_tcp_process_event_callback(int fd, int events, void *arg)
     struct hpcf_connection *c = (struct hpcf_connection *)hev->data;
     struct hpcf_event *write_ev = c->write_event;
 
-    char *buf = c->buffer;
+    char *buf = c->read_buffer;
     int n = strlen(buf);
     printf("recv from %d: %s\n", hev->fd, buf);
+
+    // 模拟的数据处理
+    // hpcf_tcp_process_read_data
+    memcpy(c->write_buffer, buf, c->read_len);
+    c->write_len = c->read_len;
+
     // 将数据处理完毕后，将数据处理完毕的标志置为1
     hev->completed = 1;
     write_ev->active = 1;
@@ -120,10 +141,10 @@ void hpcf_tcp_write_event_callback(int fd, int events, void *arg)
     struct hpcf_event *wev = (struct hpcf_event *)arg;
     struct hpcf_connection *c = (struct hpcf_connection *)wev->data;
     struct hpcf_event *read_ev = c->read_event;
-    char *buf = c->buffer;
+    char *buf = c->write_buffer;
 
     // 开始发送数据
-    int n = write(wev->fd, buf, strlen(buf));
+    int n = write(wev->fd, buf, c->write_len);
     if (n <= 0) {
         printf("write error, fd = %d %s\n", wev->fd, strerror(errno));
         // 从epoll中删除连接

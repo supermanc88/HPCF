@@ -23,6 +23,7 @@
 #include "hpcf_tcp.h"
 #include "hpcf_epoll_wraper.h"
 #include "hpcf_setaffinity.h"
+#include "hpcf_module.h"
 
 // 用来保存listenfd的事件 弃用
 struct hpcf_event g_listen_event;
@@ -467,6 +468,12 @@ int main(int argc, char *argv[])
 
             // add listen_fd to epoll
             hpcf_epoll_add_event(g_epoll_fd, listen_conn, EPOLLIN);
+
+            // module init
+            hpcf_module_manager_init();
+            // register module
+            hpcf_register_processor_modules(NULL);
+
             hpcf_worker_process_content();
             break;
         } else if (pid > 0) {

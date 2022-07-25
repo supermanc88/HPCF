@@ -27,24 +27,30 @@ struct hpcf_connection *hpcf_new_connection(int fd,
     }
 
     conn->fd = fd;
-    conn->buffer = (char *)malloc(MAX_BUF_SIZE);
-    if (conn->buffer == NULL) {
+    conn->read_buffer = (char *)malloc(MAX_BUF_SIZE);
+    if (conn->read_buffer == NULL) {
         goto err1;
+    }
+    conn->write_buffer = (char *)malloc(MAX_BUF_SIZE);
+    if (conn->write_buffer == NULL) {
+        goto err2;
     }
     conn->read_event = hpcf_new_event(fd, EPOLLIN, read_callback, accept, conn);
     if (conn->read_event == NULL) {
-        goto err2;
+        goto err3;
     }
     conn->write_event = hpcf_new_event(fd, EPOLLOUT, write_callback, accept, conn);
     if (conn->write_event == NULL) {
-        goto err3;
+        goto err4;
     }
 
     return conn;
-err3:
+err4:
     hpcf_free_event(conn->read_event);
+err3:
+    free(conn->write_buffer);
 err2:
-    free(conn->buffer);
+    free(conn->read_buffer);
 err1:
     free(conn);
     return NULL;
@@ -68,7 +74,8 @@ void hpcf_close_connection(struct hpcf_connection *conn)
 void hpcf_free_connection(struct hpcf_connection *conn)
 {
     hpcf_close_connection(conn);
-    free(conn->buffer);
+    free(conn->read_buffer);
+    free(conn->write_buffer);
     free(conn->read_event);
     free(conn->write_event);
     free(conn);

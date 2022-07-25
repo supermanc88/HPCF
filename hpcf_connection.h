@@ -10,7 +10,10 @@ struct hpcf_connection {
     struct hpcf_event *write_event;
     int in_epoll;          // 是否在epoll中
     int fd;
-    char *buffer;   // 用来存储读取/处理结果的数据
+    char *read_buffer;   // 用来存储读取/处理结果的数据
+    int read_len;
+    char *write_buffer;  // 用来存储发送结果的数据
+    int write_len;
 };
 
 struct hpcf_connection *hpcf_new_connection(int fd,
