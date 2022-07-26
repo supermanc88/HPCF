@@ -14,21 +14,88 @@
 #include "hpcf_connection.h"
 #include "hpcf_epoll_wraper.h"
 #include "hpcf_module.h"
+#include "hpcf_json_helper.h"
+#include "hpcf_module_type.h"
 
 extern int g_epoll_fd;
 extern struct list_head g_other_task_queue;
+
+// 解析tcp请求中的数据
+int hpcf_tcp_parse_data_from_header(char *json, struct hpcf_tcp_data_header *header)
+{
+    int ret = 0;
+    JSON_Value *root_value = NULL;
+    JSON_Object *root_object = NULL;
+    JSON_Object *header_object = NULL;
+
+    memset(header, 0, sizeof(struct hpcf_tcp_data_header));
+
+    root_value = json_parse_string(json);
+    if (root_value == NULL) {
+        printf("json_parse_string error\n");
+        ret = -1;
+        goto out;
+    }
+    root_object = json_value_get_object(root_value);
+    if (root_object == NULL) {
+        printf("json_value_get_object error\n");
+        ret = -1;
+        goto out;
+    }
+    header_object = json_object_get_object(root_object, "Header");
+    if (header_object == NULL) {
+        printf("json_object_get_object error\n");
+        ret = -1;
+        goto out;
+    }
+    int version = json_object_get_number(header_object, "Version");
+    header->version = version;
+    char *s = json_object_get_string(header_object, "User");
+    memcpy(header->user, s, strlen(s));
+    s = json_object_get_string(header_object, "Announce");
+    memcpy(header->announce, s, strlen(s));
+    s = json_object_get_string(header_object, "Sessionid");
+    if (strlen(s) != 0 || s != NULL)
+        memcpy(header->session_id, s, strlen(s));
+    s = json_object_get_string(header_object, "RequestType");
+    memcpy(header->request_type, s, strlen(s));
+
+out:
+    return ret;
+}
 
 // 这里通过读到的数据，进行分析，
 // 根据type，从模块队列中找到对应的模块，然后调用模块的回调函数
 void hpcf_tcp_process_read_data(struct hpcf_connection *conn)
 {
-    // 假如这个解析到的是1
-    int type = 1;
+    int ret = 0;
+    int type = HPCF_MODULE_TYPE_UNKNOWN;
+    struct hpcf_tcp_data_header header = {0};
+
+    ret = hpcf_tcp_parse_data_from_header(conn->read_buffer, &header);
+    if (ret == 0) {
+        printf("hpcf_tcp_parse_data_from_header error\n");
+        if (strcmp(header.request_type, "Session") == 0) {
+            type = HPCF_MODULE_TYPE_LOGIN_AUTH;
+        }
+        // 下面有很多else if，通过比较设置type
+        // else if
+    }
+
+    // 假如这个解析到的是0
     struct hpcf_processor_module *module = NULL;
     module = hpcf_get_processor_module_by_type(type);
+    if (module == NULL) {
+        // 如果找不到对应的模块，就把接收到的数据吐回去
+        memcpy(conn->write_buffer, conn->read_buffer, conn->read_len);
+        conn->write_len = conn->read_len;
+        conn->write_buffer[conn->write_len] = '\0';
+        printf("no module for type: %d\n", type);
+        return;
+    }
     hpcf_module_processor_callback callback = module->callback;
     // 这里处理完毕后，数据就写到了conn->write_buffer中，后面再写到socket中就可以了
-    int ret = callback(conn->read_buffer, conn->read_len, conn->write_buffer, &conn->write_len, module->data);
+    ret = callback(conn->read_buffer, conn->read_len, conn->write_buffer, &conn->write_len, module->data);
 }
 
 // 用来建立连接的回调函数
@@ -91,6 +158,7 @@ void hpcf_tcp_read_event_callback(int fd, int events, void *arg)
             hpcf_free_connection(c);
         } else {
             c->read_len = n;
+            buf[n] = '\0';
             // 读取成功后，将处理数据的任务放到任务队列中
             struct hpcf_event *proc_ev = hpcf_new_event(c->fd,
                                                         0,
@@ -117,12 +185,13 @@ void hpcf_tcp_process_event_callback(int fd, int events, void *arg)
 
     char *buf = c->read_buffer;
     int n = strlen(buf);
-    printf("recv from %d: %s\n", hev->fd, buf);
+    // printf("recv from %d: %s\n", hev->fd, buf);
 
+    // 数据处理
+    hpcf_tcp_process_read_data(c);
     // 模拟的数据处理
-    // hpcf_tcp_process_read_data
-    memcpy(c->write_buffer, buf, c->read_len);
-    c->write_len = c->read_len;
+    // memcpy(c->write_buffer, buf, c->read_len);
+    // c->write_len = c->read_len;
 
     // 将数据处理完毕后，将数据处理完毕的标志置为1
     hev->completed = 1;
@@ -155,7 +224,7 @@ void hpcf_tcp_write_event_callback(int fd, int events, void *arg)
         // 发送成功，将数据处理完毕的标志置为1
         hpcf_epoll_add_event(g_epoll_fd, c, EPOLLIN |EPOLLET| EPOLLHUP);
 
-        printf("send to %d: %s\n", wev->fd, buf);
+        // printf("send to %d: %s\n", wev->fd, buf);
         read_ev->ready = 0;
         read_ev->active = 0;
         read_ev->completed = 0;

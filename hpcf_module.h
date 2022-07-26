@@ -35,7 +35,7 @@ typedef void* dlsym_t;
 
 
 // 每个模块应实现统一的接口，用来注册到模块管理器中
-// int lib_init(struct hpcf_processor_module *module);
+// int hpcf_module_lib_init(struct hpcf_processor_module *module);
 
 dlhandle_t hpcf_load_library(char *path);
 

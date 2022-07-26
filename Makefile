@@ -1,7 +1,7 @@
 objects = $(patsubst %.c,%.o,$(wildcard *.c))
 target = crypto_cloud
 CFLAGS = -g
-LIBS = -lpthread
+LIBS = -lpthread -ldl
 
 $(target): $(objects)
 	$(CC) $(CFLAGS) -o $@ $(objects) $(LIBS)
