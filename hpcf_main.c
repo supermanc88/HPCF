@@ -378,12 +378,6 @@ int hpcf_init_listen_socket(int listen_epfd, int listen_port)
         exit(1);
     }
 
-    // listen socket
-    if (listen(listen_fd, HPCF_LISTEN_BACKLOG) == -1) {
-        perror("listen error");
-        exit(1);
-    }
-
     int s_rec = 0;
     int s_send = 0;
 
@@ -401,6 +395,12 @@ int hpcf_init_listen_socket(int listen_epfd, int listen_port)
 
     // set listen socket nonblock
     hpcf_set_fd_nonblock(listen_fd);
+
+    // listen socket
+    if (listen(listen_fd, HPCF_LISTEN_BACKLOG) == -1) {
+        perror("listen error");
+        exit(1);
+    }
 
     // init listen socket event
     // hpcf_epoll_init_event(&g_listen_event, listen_fd, EPOLLIN, &g_listen_epfd, hpcf_listen_callback);
