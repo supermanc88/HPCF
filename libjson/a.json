@@ -1,0 +1,13 @@
+{
+    "Header": {
+        "Version": 1,
+        "User": "auser",
+        "Announce": "1234567890123456",
+        "SessionID": "",
+        "RequestType": "Session"
+    },
+    "Body": {
+        "Processor": "SessionRequest1",
+        "RequestMessage": "1234567890123456"
+    }
+}
