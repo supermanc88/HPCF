@@ -9,7 +9,8 @@
 
 #define HPCF_MODULE_LIB_INIT_FUNC "hpcf_module_lib_init"
 
-typedef int (*hpcf_module_processor_callback)(char *in, int in_size, char *out, int *out_size, void *data);
+typedef int (*hpcf_module_processor_callback)(char *in, int in_size, char *out, int *out_size,
+                void **module_data, void **conn_data);
 
 // 用来加载指定目录下的所有模块并注册到指定的模块管理器中
 

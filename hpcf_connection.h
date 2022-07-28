@@ -14,6 +14,7 @@ struct hpcf_connection {
     int read_len;
     char *write_buffer;  // 用来存储发送结果的数据
     int write_len;
+    void *data;         // 用来存储用户自定义数据
 };
 
 struct hpcf_connection *hpcf_new_connection(int fd,

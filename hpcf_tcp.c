@@ -95,7 +95,9 @@ void hpcf_tcp_process_read_data(struct hpcf_connection *conn)
     }
     hpcf_module_processor_callback callback = module->callback;
     // 这里处理完毕后，数据就写到了conn->write_buffer中，后面再写到socket中就可以了
-    ret = callback(conn->read_buffer, conn->read_len, conn->write_buffer, &conn->write_len, module->data);
+    // module->data是模块数据存放指针
+    // TODO: 目前感觉还需要再传递一个此连接存放数据的指针，用来存放当前连接的一些数据
+    ret = callback(conn->read_buffer, conn->read_len, conn->write_buffer, &conn->write_len, &module->data, &conn->data);
 }
 
 // 用来建立连接的回调函数

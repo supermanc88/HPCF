@@ -76,12 +76,14 @@ struct login_auth_result {
 
 int hpcf_module_lib_init(struct hpcf_processor_module *module);
 
-int login_auth_processor_callback(char *in, int in_size, char *out, int *out_size, void *data);
+int login_auth_processor_callback(char *in, int in_size, char *out, int *out_size, void **module_data, void **conn_data);
 
 int login_auth_parse_req(char *in, int in_size, struct login_auth_req *req);
 
 int login_auth_construct_result(struct login_auth_result *result, char **out, int *out_size);
 
-int login_auth_get_sessionid(struct login_auth_req *req, char *out, int *out_size);
+int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *out, int *out_size);
+
+int login_auth_gen_32_random_string(char *data);
 
 #endif /* MODULES_LOGIN_AUTHENTICATION_LOGIN_AUTH */
