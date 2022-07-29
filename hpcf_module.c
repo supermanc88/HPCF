@@ -148,6 +148,8 @@ int hpcf_register_processor_module(struct hpcf_processor_module *module)
     // 添加到全局链表中
     hpcf_add_processor_module(module);
 
+    return 0;
+
 err1:
     hpcf_free_library(handle);
 out:

@@ -1,8 +1,10 @@
+#include <bits/types/struct_timeval.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "hpcf_module_header.h"
@@ -13,14 +15,21 @@
 #include "sm4.h"
 #include "base64.h"
 
+struct list_head g_sessionid_list;
+struct session_data {
+    struct list_head list;
+    char sessionid[128];
+    struct timeval time;    // 保存sessionid的时间
+};
+
 int hpcf_module_lib_init(struct hpcf_processor_module *module)
 {
     int ret = 0;
 
     // 本函数填充 type data 和 callback即可，其它的不用填
     module->type = HPCF_MODULE_TYPE_LOGIN_AUTH;
-    module->data = (char *)malloc(4 * 1024);
-    memset(module->data, 0, 4 * 1024);
+    INIT_LIST_HEAD(&g_sessionid_list);
+    module->data = &g_sessionid_list;
     module->callback = &login_auth_processor_callback;
 
     return ret;
@@ -31,7 +40,7 @@ int hpcf_module_lib_init(struct hpcf_processor_module *module)
 int login_auth_processor_callback(char *in, int in_size, char *out, int *out_size, void **module_data, void **conn_data)
 {
     int ret = 0;
-    struct login_auth_req req;
+    struct login_auth_req req = {0};
 
     if ( *module_data == NULL) {
         *module_data = (void *)malloc(8 * 1024);
@@ -50,13 +59,13 @@ int login_auth_processor_callback(char *in, int in_size, char *out, int *out_siz
 
     if (strlen(req.h.session_id) != 0) {
         // 验证sessionid是否有效
-        // ret = login_auth_verify_sessionid(req.h.session_id);
+        ret = login_auth_verify_sessionid(&req, req.h.session_id, *module_data, out, out_size);
         if (ret != 0) {
             goto out;
         }
     } else {
         // 获取sessionid
-        ret = login_auth_get_sessionid(&req, *conn_data, out, out_size);
+        ret = login_auth_get_sessionid(&req, *module_data, *conn_data, out, out_size);
         if (ret != 0) {
             goto out;
         }
@@ -238,10 +247,10 @@ out:
     return ret;
 }
 
-int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *out, int *out_size)
+int login_auth_get_sessionid(struct login_auth_req *req, void *module_data, void *conn_data, char *out, int *out_size)
 {
     int ret = 0;
-    if (strcmp(req->b.processor, "SessionRequest1")) {
+    if (strcmp(req->b.processor, "SessionRequest1") == 0) {
         // 根据用户名和挑战码生成一个随机数，此流程暂略
         // 假设生成的是1111111111111111
         // 生成8字节的随机数，并转换成16进制字符串，这样就不会因为0导致字符串截断了
@@ -271,7 +280,7 @@ int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *
         memcpy(out, out_json, *out_size);
         free(out_json);
 
-    } else if (strcmp(req->b.processor, "SessionRequest2")) {
+    } else if (strcmp(req->b.processor, "SessionRequest2") == 0) {
         // 需要将req->b.d.req_msg中的数据先解密，看是否和1中的随机数一致
         // 通过后，生成一个sessionid
 
@@ -287,8 +296,8 @@ int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *
         ret = base64_decode(req->b.d.req_msg, req_msg_len, enc_msg);
 
         // 解密
-        unsigned char key[16] = {0};
-        unsigned char iv[16] = {0};
+        unsigned char key[16] = {0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35};
+        unsigned char iv[16] = {0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35};
         unsigned char *dec_msg = (unsigned char *)malloc(ret);
         sm4_context ctx;
         sm4_setkey_dec(&ctx, key);
@@ -326,6 +335,13 @@ int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *
             result.b.s.result = 0;
             strcpy(result.b.s.result_msg, "OK");
             strcpy(result.b.d.ran_or_sess, sessionid);
+
+            // 将此次产生的sessionid记录到模块数据中
+            struct session_data *sess_data = (struct session_data *)malloc(sizeof(struct session_data));
+            memset(sess_data, 0, sizeof(struct session_data));
+            strcpy(sess_data->sessionid, sessionid);
+            gettimeofday(&sess_data->time, NULL);
+            list_add_tail(&sess_data->list, &g_sessionid_list);
         }
 
         // 输出json
@@ -380,6 +396,55 @@ int login_auth_gen_32_random_string(char *data)
     // 将ran转换成16进制字符串
     for (i = 0; i < 16; i++) {
         sprintf(data + i * 2, "%02x", ran[i]);
+    }
+
+    return ret;
+}
+
+int login_auth_verify_sessionid(struct login_auth_req *req, char *session_id, void *module_data, char *out, int *out_size)
+{
+    int ret = -1;
+
+    // 遍历g_sessionid_list，查找sessionid
+    struct list_head *pos;
+    struct session_data *sess_data;
+    list_for_each(pos, &g_sessionid_list) {
+        sess_data = list_entry(pos, struct session_data, list);
+        if (strcmp(sess_data->sessionid, session_id) == 0) {
+            // 找到了
+            // 判断是否超时
+            struct timeval now;
+            gettimeofday(&now, NULL);
+            if (now.tv_sec - sess_data->time.tv_sec > 3600) {
+                // 超时
+                ret = -1;
+            } else {
+                // 更新时间
+                sess_data->time = now;
+                ret = 0;
+            }
+            break;
+        }
+    }
+    // 如果没有找到，ret = -1
+    if (ret != 0) {
+        // 外面就直接返回了，需要填充out
+        struct login_auth_result result;
+        memset(&result, 0, sizeof(result));
+        // header 不用变，直接复制
+        memcpy(&result.h, &req->h, sizeof(struct login_auth_header));
+        strcpy(result.b.processor, "SessionResponse");
+        result.b.s.result = -1;
+        strcpy(result.b.s.result_msg, "Sessionid verify failed");
+        // strcpy(result.b.d.ran_or_sess, "");
+
+        // 输出json
+        char *out_json = NULL;
+        login_auth_construct_result(&result, &out_json, out_size);
+
+        // 输出到out
+        memcpy(out, out_json, *out_size);
+        free(out_json);
     }
 
     return ret;

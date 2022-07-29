@@ -449,6 +449,8 @@ int main(int argc, char *argv[])
 
     int listen_fd = hpcf_init_listen_socket(g_epoll_fd, HPCF_LISTEN_PORT);
 
+#ifdef HPCF_DEBUG
+
     // create worker process
     int i;
     for (i = 0; i < HPCF_WORKER_PROCESS_NUM; i++) {
@@ -489,6 +491,29 @@ int main(int argc, char *argv[])
 
     // wait for worker process
     wait(NULL);
+#else
+
+    g_epoll_fd = epoll_create(HPCF_MAX_EVENTS);
+    struct hpcf_connection *listen_conn = hpcf_new_connection(listen_fd,
+                                    hpcf_tcp_accept_event_callback,
+                                    NULL,
+                                    1);
+    
+    g_listen_fd = listen_fd;
+    g_listen_conn = listen_conn;
+
+    printf("g_listen_fd: %d g_listen_conn->fd: %d\n", g_listen_fd, g_listen_conn->fd);
+
+    // add listen_fd to epoll
+    hpcf_epoll_add_event(g_epoll_fd, listen_conn, EPOLLIN);
+
+    // module init
+    hpcf_module_manager_init();
+    // register module
+    hpcf_register_processor_modules("/root/hpcf-dev/plugins");
+
+    hpcf_worker_process_content();
+#endif
 
     return ret;
 }

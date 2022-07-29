@@ -55,7 +55,7 @@ int hpcf_tcp_parse_data_from_header(char *json, struct hpcf_tcp_data_header *hea
     s = json_object_get_string(header_object, "Announce");
     memcpy(header->announce, s, strlen(s));
     s = json_object_get_string(header_object, "Sessionid");
-    if (strlen(s) != 0 || s != NULL)
+    if (s != NULL)
         memcpy(header->session_id, s, strlen(s));
     s = json_object_get_string(header_object, "RequestType");
     memcpy(header->request_type, s, strlen(s));
@@ -79,7 +79,16 @@ void hpcf_tcp_process_read_data(struct hpcf_connection *conn)
             type = HPCF_MODULE_TYPE_LOGIN_AUTH;
         }
         // 下面有很多else if，通过比较设置type
-        // else if
+        else if(strcmp(header.request_type, "Operation") == 0) {
+            // 先验session
+            struct hpcf_processor_module *session_module = hpcf_get_processor_module_by_type(HPCF_MODULE_TYPE_LOGIN_AUTH);
+            hpcf_module_processor_callback cb = session_module->callback;
+            ret = cb(conn->read_buffer, conn->read_len, conn->write_buffer, &conn->write_len, &session_module->data, &conn->data);
+            if (ret != 0) {
+                printf("session verify error\n");
+                return ;
+            }
+        }
     }
 
     // 假如这个解析到的是0

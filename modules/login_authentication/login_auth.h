@@ -55,7 +55,7 @@ struct login_auth_req {
     struct req_body {
         char processor[32];
         struct req_data {
-            char req_msg[128];
+            char req_msg[1024];
         }d;
     }b;
 };
@@ -66,7 +66,7 @@ struct login_auth_result {
         char processor[32];
         struct status {
             int result;
-            char result_msg[128];
+            char result_msg[1024];
         }s;
         struct res_data {
             char ran_or_sess[64];
@@ -82,7 +82,9 @@ int login_auth_parse_req(char *in, int in_size, struct login_auth_req *req);
 
 int login_auth_construct_result(struct login_auth_result *result, char **out, int *out_size);
 
-int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *out, int *out_size);
+int login_auth_get_sessionid(struct login_auth_req *req, void *module_data, void *conn_data, char *out, int *out_size);
+
+int login_auth_verify_sessionid(struct login_auth_req *req, char *session_id, void *module_data, char *out, int *out_size);
 
 int login_auth_gen_32_random_string(char *data);
 
