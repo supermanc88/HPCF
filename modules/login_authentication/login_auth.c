@@ -9,6 +9,9 @@
 #include "hpcf_module_type.h"
 #include "login_auth.h"
 #include "parson.h"
+#include "sm3.h"
+#include "sm4.h"
+#include "base64.h"
 
 int hpcf_module_lib_init(struct hpcf_processor_module *module)
 {
@@ -255,7 +258,7 @@ int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *
         strcpy(result.b.s.result_msg, "OK");
         strcpy(result.b.d.ran_or_sess, ran_str);
 
-        // 记到conn_data中
+        // 生成的随机数记到conn_data中
         strcpy((char *)conn_data, ran_str);
 
         // 输出json
@@ -274,17 +277,56 @@ int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *
 
         // 加密的数据格式为：
         // |random_str|username|password|padding
+        // 应该先base64解码
         // 我这里解密(sm4)出来后，直接验证random_str是不是之前发送的就可以了
         // sessionid的生成方式为：
         // 使用sm3对|random_str|username|进行hash，得到sessionid
+        int req_msg_len = strlen(req->b.d.req_msg);
+        unsigned char *enc_msg = (unsigned char *)malloc(req_msg_len);
+        memset(enc_msg, 0, req_msg_len);
+        ret = base64_decode(req->b.d.req_msg, req_msg_len, enc_msg);
+
+        // 解密
+        unsigned char key[16] = {0};
+        unsigned char iv[16] = {0};
+        unsigned char *dec_msg = (unsigned char *)malloc(ret);
+        sm4_context ctx;
+        sm4_setkey_dec(&ctx, key);
+        sm4_crypt_cbc(&ctx, SM4_DECRYPT, ret, iv, enc_msg, dec_msg);
+
+        // 使用 | 作为分隔符，分割字符串
+        char *random_str = strtok((char *)dec_msg, "|");
+        char *username = strtok(NULL, "|");
+
         struct login_auth_result result;
         memset(&result, 0, sizeof(result));
-        // header 不用变，直接复制
-        memcpy(&result.h, &req->h, sizeof(struct login_auth_header));
-        strcpy(result.b.processor, "SessionResponse2");
-        result.b.s.result = 0;
-        strcpy(result.b.s.result_msg, "OK");
-        strcpy(result.b.d.ran_or_sess, "222222222222222222");
+
+        // 验证random_str
+        if (strcmp((char *)conn_data, random_str)) {
+            // 验证失败
+            // header 不用变，直接复制
+            memcpy(&result.h, &req->h, sizeof(struct login_auth_header));
+            strcpy(result.b.processor, "SessionResponse2");
+            result.b.s.result = -1;
+            strcpy(result.b.s.result_msg, "Login verify failed");
+        } else {
+            // 生成sessionid
+            char sessionid[65] = {0};
+            char hash[32] = {0};
+            char data[128] = {0};
+            sprintf(data, "%s|%s", random_str, username);
+            sm3((unsigned char *)data, strlen(data), (unsigned char *)hash);
+            int i;
+            for (i = 0; i < 32; i++) {
+                sprintf(sessionid + i * 2, "%02x", (unsigned char)hash[i]);
+            }
+            // header 不用变，直接复制
+            memcpy(&result.h, &req->h, sizeof(struct login_auth_header));
+            strcpy(result.b.processor, "SessionResponse2");
+            result.b.s.result = 0;
+            strcpy(result.b.s.result_msg, "OK");
+            strcpy(result.b.d.ran_or_sess, sessionid);
+        }
 
         // 输出json
         char *out_json = NULL;
@@ -296,6 +338,7 @@ int login_auth_get_sessionid(struct login_auth_req *req, void *conn_data, char *
         memcpy(out, out_json, *out_size);
         free(out_json);
 
+        ret = 0;
 
     } else {
         // error
